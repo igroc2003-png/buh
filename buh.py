@@ -1,137 +1,51 @@
-# buh.py
-import sqlite3
-import logging
+import os
 import hashlib
-from datetime import datetime, timedelta
-from flask import Flask, request
+import sqlite3
+from datetime import datetime
+from flask import Flask, request, abort
 from maxgram import Bot
-from maxgram.keyboards import InlineKeyboard
-from config import TOKEN, ADMIN_ID, SUPPORT_URL, ROBO_PASS2
 
-# ================== ЛОГИ ==================
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s - BOT - %(levelname)s - %(message)s")
-log = logging.getLogger("BOT")
+# ================== КОНФИГ ==================
+from config import TOKEN, ROBO_PASS2, ADMIN_ID
 
-# ================== ФЛАСК ==================
+DB_PATH = "profiles.db"
+
+# ================== FLASK ==================
 app = Flask(__name__)
 
-DB_FILE = "profiles.db"   # База профилей
-GEO_DB = "geo.db"
+# ================== MAXGRAM BOT ==================
+# Получаем внешний URL Render автоматически
+RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+WEBHOOK_URL = f"https://{RENDER_HOST}/webhook"
 
-# ================== БАЗА ДАННЫХ ==================
-def create_db():
-    conn = sqlite3.connect(DB_FILE)
+bot = Bot(token=TOKEN, webhook_url=WEBHOOK_URL)
+
+
+# ================== ФУНКЦИИ РАБОТЫ С VIP ==================
+def add_vip(user_id: str, days: int) -> bool:
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE IF NOT EXISTS profiles (
-        user_id TEXT PRIMARY KEY,
-        name TEXT,
-        gender TEXT,
-        birthdate TEXT,
-        age INTEGER,
-        zodiac TEXT,
-        city TEXT,
-        region TEXT,
-        about TEXT,
-        photo_url TEXT,
-        is_vip INTEGER DEFAULT 0,
-        vip_until INTEGER DEFAULT NULL,
-        deleted_at TEXT DEFAULT NULL,
-        created_at TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%S','now','localtime'))
-    )""")
-    conn.commit()
-    conn.close()
-
-def get_profile(user_id):
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM profiles WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-def save_profile(user_id, data):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO profiles (user_id, name, gender, birthdate, age, zodiac,
-                              city, region, about, photo_url, is_vip, vip_until)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            name=excluded.name,
-            gender=excluded.gender,
-            birthdate=excluded.birthdate,
-            age=excluded.age,
-            zodiac=excluded.zodiac,
-            city=excluded.city,
-            region=excluded.region,
-            about=excluded.about,
-            photo_url=excluded.photo_url,
-            is_vip=excluded.is_vip,
-            vip_until=excluded.vip_until
-    """, (
-        user_id,
-        data.get("name"),
-        data.get("gender"),
-        data.get("birthdate"),
-        data.get("age"),
-        data.get("zodiac"),
-        data.get("city"),
-        data.get("region"),
-        data.get("about"),
-        data.get("photo_url"),
-        data.get("is_vip", 0),
-        data.get("vip_until")
-    ))
-    conn.commit()
-    conn.close()
-
-# ================== GEO ==================
-def find_cities(prefix, limit=10):
-    try:
-        conn = sqlite3.connect(GEO_DB)
-        cursor = conn.cursor()
-        prefix = prefix.capitalize()
-        cursor.execute("SELECT name, region FROM geo WHERE name LIKE ? LIMIT ?", (prefix + "%", limit))
-        cities = cursor.fetchall()
+    cursor.execute("SELECT vip_until FROM profiles WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row:
         conn.close()
-        return cities
-    except:
-        return []
-
-# ================== ЗОДИАК ==================
-def get_zodiac(day, month):
-    zodiac_dates = [
-        (120, "Козерог"), (218, "Водолей"), (320, "Рыбы"), (420, "Овен"),
-        (521, "Телец"), (621, "Близнецы"), (722, "Рак"), (823, "Лев"),
-        (923, "Дева"), (1023, "Весы"), (1122, "Скорпион"), (1222, "Стрелец"), (1231, "Козерог")
-    ]
-    n = month * 100 + day
-    for end, sign in zodiac_dates:
-        if n <= end:
-            return sign
-    return "Козерог"
-
-# ================== ROBOKASSA ==================
-def add_vip(user_id, days):
-    profile = get_profile(user_id)
-    if not profile:
         return False
 
+    current_vip = row[0] or 0
     now_ts = int(datetime.now().timestamp())
-    current_vip = profile.get("vip_until") or now_ts
 
     if current_vip > now_ts:
         new_vip = current_vip + days * 86400
     else:
         new_vip = now_ts + days * 86400
 
-    profile["vip_until"] = new_vip
-    profile["is_vip"] = 1
-    save_profile(user_id, profile)
+    cursor.execute("UPDATE profiles SET vip_until = ? WHERE user_id = ?", (new_vip, user_id))
+    conn.commit()
+    conn.close()
     return True
 
+
+# ================== WEBHOOK ДЛЯ ROBOKASSA ==================
 @app.route("/robokassa_result", methods=["POST"])
 def robokassa_result():
     out_summ = request.form.get("OutSum")
@@ -141,6 +55,7 @@ def robokassa_result():
     if not out_summ or not inv_id:
         return "bad request"
 
+    # Проверка подписи
     my_crc = hashlib.md5(f"{out_summ}:{inv_id}:{ROBO_PASS2}".encode()).hexdigest().upper()
     if my_crc != signature:
         return "bad sign"
@@ -148,54 +63,49 @@ def robokassa_result():
     try:
         user_id, days = inv_id.split("_")
         days = int(days)
-    except:
+    except Exception:
         return "bad invoice"
 
-    if not add_vip(user_id, days):
+    success = add_vip(user_id, days)
+    if not success:
         return "user not found"
 
     return f"OK{inv_id}"
 
-# ================== БОТ ==================
-bot = Bot(TOKEN)
-users = {}  # временные данные пользователей
 
-# Главное меню
-def main_menu(profile=None):
-    emoji = "👤"
-    if profile:
-        if profile.get("gender") == "М": emoji="👨"
-        if profile.get("gender") == "Ж": emoji="👩"
-    return InlineKeyboard(
-        [{"text":"⭐ VIP","callback":"vip"}],
-        [{"text":f"{emoji} Анкета","callback":"open_profile"}],
-        [{"text":"🎯 Фильтры","callback":"filters"}],
-        [{"text":"🎲 Рулетка","callback":"roulette"}],
-        [{"text":"🆘 Поддержка","url": SUPPORT_URL}]
+# ================== WEBHOOK ДЛЯ MAXGRAM ==================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = request.get_json(force=True)
+    if not update:
+        abort(400)
+    bot.process(update)  # передаем обновление боту
+    return "OK"
+
+
+# ================== ИНИЦИАЛИЗАЦИЯ БАЗЫ ==================
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS profiles (
+        user_id TEXT PRIMARY KEY,
+        name TEXT,
+        gender TEXT,
+        birth TEXT,
+        vip_until INTEGER DEFAULT 0,
+        city TEXT,
+        about TEXT
     )
+    """)
+    conn.commit()
+    conn.close()
 
-# ================== СТАРТ ==================
-@bot.command("start")
-def start(ctx):
-    chat_id = str(ctx.chat_id)
-    profile = get_profile(chat_id)
-    if profile:
-        ctx.reply("Главное меню:", keyboard=main_menu(profile))
-    else:
-        ctx.reply("🔞 Вам есть 18 лет?", keyboard=InlineKeyboard([{"text":"✅ Да","callback":"age_yes"},{"text":"❌ Нет","callback":"age_no"}]))
+
+init_db()
 
 # ================== RUN ==================
 if __name__ == "__main__":
-    log.info("🚀 Создаём таблицы, если нет")
-    create_db()
-
-    # Запускаем бот и Flask вместе
-    from threading import Thread
-    def run_flask():
-        app.run(host="0.0.0.0", port=5000)
-
-    def run_bot():
-        bot.run()
-
-    Thread(target=run_flask).start()
-    Thread(target=run_bot).start()
+    port = int(os.environ.get("PORT", 5000))
+    print(f"🚀 Server running on port {port}, webhook URL: {WEBHOOK_URL}")
+    app.run(host="0.0.0.0", port=port)
