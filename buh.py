@@ -2,22 +2,25 @@ import os
 import hashlib
 import sqlite3
 import requests
+import urllib3
 from datetime import datetime
 from flask import Flask, request, abort
 from maxgram import Bot
 from config import TOKEN, ROBO_PASS2
+
+# ================== ОТКЛЮЧАЕМ SSL WARNING ==================
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ================== НАСТРОЙКИ ==================
 DB_PATH = "profiles.db"
 app = Flask(__name__)
 bot = Bot(TOKEN)
 
-# Render даёт внешний домен автоматически
 RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
 WEBHOOK_URL = f"https://{RENDER_HOST}/webhook"
 
 
-# ================== ИНИЦИАЛИЗАЦИЯ БАЗЫ ==================
+# ================== БАЗА ==================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -87,7 +90,6 @@ def robokassa_result():
     if not out_summ or not inv_id:
         return "bad request"
 
-    # Проверка подписи
     my_crc = hashlib.md5(
         f"{out_summ}:{inv_id}:{ROBO_PASS2}".encode()
     ).hexdigest().upper()
@@ -96,7 +98,6 @@ def robokassa_result():
         return "bad sign"
 
     try:
-        # InvId должен быть вида userId_days
         user_id, days = inv_id.split("_")
         days = int(days)
     except Exception:
@@ -114,8 +115,8 @@ def robokassa_result():
 def set_webhook():
     url = f"https://api.max.ru/bot{TOKEN}/setWebhook?url={WEBHOOK_URL}"
     try:
-        requests.get(url)
-        print("✅ Webhook установлен:", WEBHOOK_URL)
+        response = requests.get(url, verify=False)
+        print("✅ Webhook установлен:", response.text)
     except Exception as e:
         print("❌ Ошибка установки webhook:", e)
 
@@ -126,7 +127,7 @@ if __name__ == "__main__":
     set_webhook()
 
     port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Server running on port {port}")
-    print(f"🌐 Webhook URL: {WEBHOOK_URL}")
+    print(f"🚀 Сервер работает на порту {port}")
+    print(f"🌐 URL вебхука: {WEBHOOK_URL}")
 
     app.run(host="0.0.0.0", port=port)
