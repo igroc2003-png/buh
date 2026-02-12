@@ -1,23 +1,16 @@
 import os
-import hashlib
 import sqlite3
-import requests
-import urllib3
+import hashlib
+import threading
 from datetime import datetime
-from flask import Flask, request, abort
+from flask import Flask, request
 from maxgram import Bot
 from config import TOKEN, ROBO_PASS2
-
-# ================== ОТКЛЮЧАЕМ SSL WARNING ==================
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ================== НАСТРОЙКИ ==================
 DB_PATH = "profiles.db"
 app = Flask(__name__)
 bot = Bot(TOKEN)
-
-RENDER_HOST = os.environ.get("RENDER_EXTERNAL_HOSTNAME")
-WEBHOOK_URL = f"https://{RENDER_HOST}/webhook"
 
 
 # ================== БАЗА ==================
@@ -39,7 +32,6 @@ def init_db():
     conn.close()
 
 
-# ================== ДОБАВЛЕНИЕ VIP ==================
 def add_vip(user_id: str, days: int):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -69,18 +61,7 @@ def add_vip(user_id: str, days: int):
     return True
 
 
-# ================== WEBHOOK MAXGRAM ==================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = request.get_json(force=True)
-    if not update:
-        abort(400)
-
-    bot.process_update(update)
-    return "OK"
-
-
-# ================== WEBHOOK ROBOKASSA ==================
+# ================== ROBOKASSA ==================
 @app.route("/robokassa_result", methods=["POST"])
 def robokassa_result():
     out_summ = request.form.get("OutSum")
@@ -100,7 +81,7 @@ def robokassa_result():
     try:
         user_id, days = inv_id.split("_")
         days = int(days)
-    except Exception:
+    except:
         return "bad invoice"
 
     success = add_vip(user_id, days)
@@ -111,23 +92,22 @@ def robokassa_result():
     return f"OK{inv_id}"
 
 
-# ================== УСТАНОВКА WEBHOOK ==================
-def set_webhook():
-    url = f"https://api.max.ru/bot{TOKEN}/setWebhook?url={WEBHOOK_URL}"
-    try:
-        response = requests.get(url, verify=False)
-        print("✅ Webhook установлен:", response.text)
-    except Exception as e:
-        print("❌ Ошибка установки webhook:", e)
+# ================== ЗАПУСК POLLING В ОТДЕЛЬНОМ ПОТОКЕ ==================
+def start_bot():
+    print("🤖 Запуск MAX polling...")
+    bot.run()  # MAX работает только через polling
 
 
 # ================== ЗАПУСК ==================
 if __name__ == "__main__":
     init_db()
-    set_webhook()
 
+    # Запускаем бота в отдельном потоке
+    bot_thread = threading.Thread(target=start_bot)
+    bot_thread.start()
+
+    # Flask для Robokassa
     port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Сервер работает на порту {port}")
-    print(f"🌐 URL вебхука: {WEBHOOK_URL}")
+    print(f"🚀 Flask запущен на порту {port}")
 
     app.run(host="0.0.0.0", port=port)
