@@ -7,7 +7,6 @@ from flask import Flask, request
 from maxgram import Bot
 from config import TOKEN, ROBO_PASS2
 
-# ================== НАСТРОЙКИ ==================
 DB_PATH = "profiles.db"
 app = Flask(__name__)
 bot = Bot(TOKEN)
@@ -92,22 +91,21 @@ def robokassa_result():
     return f"OK{inv_id}"
 
 
-# ================== ЗАПУСК POLLING В ОТДЕЛЬНОМ ПОТОКЕ ==================
-def start_bot():
-    print("🤖 Запуск MAX polling...")
-    bot.run()  # MAX работает только через polling
+# ================== FLASK В ОТДЕЛЬНОМ ПОТОКЕ ==================
+def start_flask():
+    port = int(os.environ.get("PORT", 5000))
+    print(f"🌐 Flask запущен на порту {port}")
+    app.run(host="0.0.0.0", port=port)
 
 
 # ================== ЗАПУСК ==================
 if __name__ == "__main__":
     init_db()
 
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=start_bot)
-    bot_thread.start()
+    # Flask в отдельном потоке
+    flask_thread = threading.Thread(target=start_flask)
+    flask_thread.start()
 
-    # Flask для Robokassa
-    port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Flask запущен на порту {port}")
-
-    app.run(host="0.0.0.0", port=port)
+    # Основной поток — polling MAX
+    print("🤖 Запуск MAX polling...")
+    bot.run()
