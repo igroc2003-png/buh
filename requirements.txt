@@ -1,3 +1,4 @@
 flask
 maxgram
 requests
+psycopg2-binary
