@@ -1,111 +1,83 @@
-import os
-import sqlite3
-import hashlib
-import threading
-from datetime import datetime
-from flask import Flask, request
+import logging
+from flask import Flask, request, jsonify
 from maxgram import Bot
-from config import TOKEN, ROBO_PASS2
+from config import TOKEN
+import sqlite3
 
-DB_PATH = "profiles.db"
-app = Flask(__name__)
-bot = Bot(TOKEN)
+# ================== ЛОГИ ==================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - БОТ - %(levelname)s - %(message)s"
+)
+log = logging.getLogger("БОТ")
 
+# ================== Flask ==================
+app = Flask("buh")
 
-# ================== БАЗА ==================
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS profiles (
-        user_id TEXT PRIMARY KEY,
-        name TEXT,
-        gender TEXT,
-        birth TEXT,
-        vip_until INTEGER DEFAULT 0,
-        city TEXT,
-        about TEXT
-    )
-    """)
-    conn.commit()
-    conn.close()
+# ================== Инициализация бота ==================
+bot = Bot(token=TOKEN)  # Без webhook_url, мы будем ставить вручную через setWebhook
 
+# ================== БД ==================
+conn = sqlite3.connect("profiles.db", check_same_thread=False)
+cursor = conn.cursor()
 
-def add_vip(user_id: str, days: int):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    vip INTEGER DEFAULT 0
+)
+""")
+conn.commit()
 
-    cursor.execute("SELECT vip_until FROM profiles WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
+# ================== Вебхук ==================
+WEBHOOK_URL = "https://buh-ck22.onrender.com/webhook"
 
-    if not row:
-        conn.close()
-        return False
-
-    current_vip = row[0] or 0
-    now_ts = int(datetime.now().timestamp())
-
-    if current_vip > now_ts:
-        new_vip = current_vip + days * 86400
-    else:
-        new_vip = now_ts + days * 86400
-
-    cursor.execute(
-        "UPDATE profiles SET vip_until = ? WHERE user_id = ?",
-        (new_vip, user_id)
-    )
-
-    conn.commit()
-    conn.close()
-    return True
-
-
-# ================== ROBOKASSA ==================
-@app.route("/robokassa_result", methods=["POST"])
-def robokassa_result():
-    out_summ = request.form.get("OutSum")
-    inv_id = request.form.get("InvId")
-    signature = request.form.get("SignatureValue", "").upper()
-
-    if not out_summ or not inv_id:
-        return "bad request"
-
-    my_crc = hashlib.md5(
-        f"{out_summ}:{inv_id}:{ROBO_PASS2}".encode()
-    ).hexdigest().upper()
-
-    if my_crc != signature:
-        return "bad sign"
-
+def set_webhook():
+    import requests
     try:
-        user_id, days = inv_id.split("_")
-        days = int(days)
-    except:
-        return "bad invoice"
+        r = requests.get(f"https://api.max.ru/bot{TOKEN}/setWebhook?url={WEBHOOK_URL}")
+        if r.status_code == 200:
+            log.info(f"Вебхук установлен: {WEBHOOK_URL}")
+        else:
+            log.error(f"Ошибка установки вебхука: {r.text}")
+    except Exception as e:
+        log.error(f"Ошибка при setWebhook: {e}")
 
-    success = add_vip(user_id, days)
+set_webhook()
 
-    if not success:
-        return "user not found"
+# ================== Обработчик вебхука ==================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"status": "empty"}), 400
 
-    return f"OK{inv_id}"
+        user_id = data.get("user_id")
+        text = data.get("text")
 
+        if text == "/start":
+            # Проверяем есть ли пользователь в базе
+            cursor.execute("SELECT * FROM profiles WHERE user_id = ?", (user_id,))
+            profile = cursor.fetchone()
+            if not profile:
+                cursor.execute("INSERT INTO profiles(user_id, vip) VALUES(?, ?)", (user_id, 0))
+                conn.commit()
+            bot.send_message(user_id, "Привет! Ваш профиль создан ✅")
+            return jsonify({"status": "ok"})
 
-# ================== FLASK В ОТДЕЛЬНОМ ПОТОКЕ ==================
-def start_flask():
-    port = int(os.environ.get("PORT", 5000))
-    print(f"🌐 Flask запущен на порту {port}")
-    app.run(host="0.0.0.0", port=port)
+        # Здесь можно обрабатывать другие команды
+        bot.send_message(user_id, f"Вы написали: {text}")
+        return jsonify({"status": "ok"})
 
+    except Exception as e:
+        log.error(f"Ошибка вебхука: {e}")
+        return jsonify({"status": "error"}), 500
 
-# ================== ЗАПУСК ==================
+# ================== Главный запуск ==================
 if __name__ == "__main__":
-    init_db()
-
-    # Flask в отдельном потоке
-    flask_thread = threading.Thread(target=start_flask)
-    flask_thread.start()
-
-    # Основной поток — polling MAX
-    print("🤖 Запуск MAX polling...")
-    bot.run()
+    import os
+    port = int(os.environ.get("PORT", 10000))
+    log.info(f"🌐 Flask запущен на порту {port}")
+    app.run(host="0.0.0.0", port=port)
